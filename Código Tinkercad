@@ -1,0 +1,498 @@
+
+#include <Servo.h>
+#include <Wire.h>
+#include <Adafruit_LiquidCrystal.h>
+#include <Keypad.h>
+
+// ==================================================
+// LCD
+// ==================================================
+
+Adafruit_LiquidCrystal lcd(0);
+
+// ==================================================
+// SENSORES LDR
+// ==================================================
+
+const int LDR1 = A0;
+const int LDR2 = A1;
+const int LDR3 = A2;
+const int LDR4 = A3;
+
+int ldrSE = 0;
+int ldrSD = 0;
+int ldrIE = 0;
+int ldrID = 0;
+
+// ==================================================
+// SERVOMOTORES
+// ==================================================
+
+Servo servoHorizontal;
+Servo servoVertical;
+
+int anguloHorizontal = 90;
+int anguloVertical = 90;
+
+int ultimoHorizontal = -1;
+int ultimoVertical = -1;
+
+// ==================================================
+// CONFIGURACOES
+// ==================================================
+
+const int LIMITE = 50;
+const int PASSO = 1;
+
+const int ANGULO_MIN = 0;
+const int ANGULO_MAX = 180;
+
+// Valores próximos dos limites indicam
+// possível problema de ligação do sensor.
+const int LIMITE_MIN_SENSOR = 2;
+const int LIMITE_MAX_SENSOR = 1021;
+
+// ==================================================
+// ESTADOS DO SISTEMA
+// ==================================================
+
+enum Estado {
+  AUTOMATICO,
+  MANUAL,
+  CENTRALIZADO,
+  FALHA
+};
+
+Estado estadoAtual = AUTOMATICO;
+
+// ==================================================
+// TECLADO 4X4
+// ==================================================
+
+char teclas[4][4] = {
+  {'1','2','3','A'},
+  {'4','5','6','B'},
+  {'7','8','9','C'},
+  {'*','0','#','D'}
+};
+
+byte linhas[4] = {2, 3, 4, 5};
+byte colunas[4] = {6, 7, 8, 11};
+
+Keypad teclado = Keypad(
+  makeKeymap(teclas),
+  linhas,
+  colunas,
+  4,
+  4
+);
+
+// ==================================================
+// TEMPORIZACAO
+// ==================================================
+
+unsigned long tempoLeitura = 0;
+unsigned long tempoLCD = 0;
+unsigned long tempoFalha = 0;
+
+const unsigned long INTERVALO_LEITURA = 50;
+const unsigned long INTERVALO_LCD = 2000;
+const unsigned long TEMPO_RECUPERACAO = 2000;
+
+int telaAtual = 0;
+
+bool sensoresValidos = true;
+
+// ==================================================
+// FILTRO DE LEITURA
+// ==================================================
+
+int lerMedia(int pino) {
+
+  long soma = 0;
+
+  for (int i = 0; i < 5; i++) {
+    soma += analogRead(pino);
+  }
+
+  return soma / 5;
+}
+
+// ==================================================
+// LEITURA DOS SENSORES
+// ==================================================
+
+void lerSensores() {
+
+  ldrSE = lerMedia(LDR1);
+  ldrSD = lerMedia(LDR2);
+  ldrIE = lerMedia(LDR3);
+  ldrID = lerMedia(LDR4);
+
+}
+
+// ==================================================
+// VERIFICACAO DOS SENSORES
+// ==================================================
+
+bool verificarSensores() {
+
+  if (ldrSE <= LIMITE_MIN_SENSOR ||
+      ldrSD <= LIMITE_MIN_SENSOR ||
+      ldrIE <= LIMITE_MIN_SENSOR ||
+      ldrID <= LIMITE_MIN_SENSOR) {
+
+    return false;
+  }
+
+  if (ldrSE >= LIMITE_MAX_SENSOR ||
+      ldrSD >= LIMITE_MAX_SENSOR ||
+      ldrIE >= LIMITE_MAX_SENSOR ||
+      ldrID >= LIMITE_MAX_SENSOR) {
+
+    return false;
+  }
+
+  return true;
+}
+
+// ==================================================
+// CONTROLE DOS SERVOMOTORES
+// ==================================================
+
+void atualizarServos() {
+
+  if (anguloHorizontal != ultimoHorizontal) {
+
+    servoHorizontal.write(anguloHorizontal);
+    ultimoHorizontal = anguloHorizontal;
+
+  }
+
+  if (anguloVertical != ultimoVertical) {
+
+    servoVertical.write(anguloVertical);
+    ultimoVertical = anguloVertical;
+
+  }
+
+}
+
+// ==================================================
+// RASTREAMENTO AUTOMATICO
+// ==================================================
+
+void rastreamentoAutomatico() {
+
+  int superior = (ldrSE + ldrSD) / 2;
+  int inferior = (ldrIE + ldrID) / 2;
+
+  int esquerda = (ldrSE + ldrIE) / 2;
+  int direita = (ldrSD + ldrID) / 2;
+
+  // Controle horizontal
+
+  if (esquerda > direita + LIMITE) {
+
+    anguloHorizontal += PASSO;
+
+  }
+  else if (direita > esquerda + LIMITE) {
+
+    anguloHorizontal -= PASSO;
+
+  }
+
+  // Controle vertical
+
+  if (superior > inferior + LIMITE) {
+
+    anguloVertical += PASSO;
+
+  }
+  else if (inferior > superior + LIMITE) {
+
+    anguloVertical -= PASSO;
+
+  }
+
+  anguloHorizontal = constrain(
+    anguloHorizontal,
+    ANGULO_MIN,
+    ANGULO_MAX
+  );
+
+  anguloVertical = constrain(
+    anguloVertical,
+    ANGULO_MIN,
+    ANGULO_MAX
+  );
+
+}
+
+// ==================================================
+// CONTROLE MANUAL
+// ==================================================
+
+void controlarTeclado() {
+
+  char tecla = teclado.getKey();
+
+  if (tecla == NO_KEY) {
+    return;
+  }
+
+  switch (tecla) {
+
+    case 'A':
+    case '#':
+
+      estadoAtual = AUTOMATICO;
+      break;
+
+    case 'B':
+
+      estadoAtual = MANUAL;
+      break;
+
+    case '5':
+
+      estadoAtual = CENTRALIZADO;
+
+      anguloHorizontal = 90;
+      anguloVertical = 90;
+
+      break;
+
+    case '4':
+
+      estadoAtual = MANUAL;
+      anguloHorizontal -= PASSO;
+
+      break;
+
+    case '6':
+
+      estadoAtual = MANUAL;
+      anguloHorizontal += PASSO;
+
+      break;
+
+    case '8':
+
+      estadoAtual = MANUAL;
+      anguloVertical += PASSO;
+
+      break;
+
+    case '2':
+
+      estadoAtual = MANUAL;
+      anguloVertical -= PASSO;
+
+      break;
+  }
+
+  anguloHorizontal = constrain(
+    anguloHorizontal, 0, 180
+  );
+
+  anguloVertical = constrain(
+    anguloVertical, 0, 180
+  );
+
+}
+
+// ==================================================
+// CONTROLE DE FALHAS
+// ==================================================
+
+void controlarFalhas() {
+
+  sensoresValidos = verificarSensores();
+
+  if (!sensoresValidos) {
+
+    estadoAtual = FALHA;
+    tempoFalha = millis();
+
+    return;
+  }
+
+  if (estadoAtual == FALHA) {
+
+    if (millis() - tempoFalha >= TEMPO_RECUPERACAO) {
+
+      estadoAtual = AUTOMATICO;
+
+    }
+
+  }
+
+}
+
+// ==================================================
+// LCD
+// ==================================================
+
+void atualizarLCD() {
+
+  unsigned long agora = millis();
+
+  if (agora - tempoLCD < INTERVALO_LCD) {
+    return;
+  }
+
+  tempoLCD = agora;
+
+  lcd.clear();
+
+  if (estadoAtual == FALHA) {
+
+    lcd.setCursor(0, 0);
+    lcd.print("ERRO NOS SENSORES");
+
+    lcd.setCursor(0, 1);
+    lcd.print("Verifique LDRs");
+
+    return;
+  }
+
+  if (telaAtual == 0) {
+
+    lcd.setCursor(0, 0);
+    lcd.print("H:");
+    lcd.print(anguloHorizontal);
+
+    lcd.print(" V:");
+    lcd.print(anguloVertical);
+
+    lcd.setCursor(0, 1);
+
+    switch (estadoAtual) {
+
+      case AUTOMATICO:
+        lcd.print("MODO AUTOMATICO");
+        break;
+
+      case MANUAL:
+        lcd.print("MODO MANUAL");
+        break;
+
+      case CENTRALIZADO:
+        lcd.print("CENTRALIZADO");
+        break;
+
+      default:
+        break;
+    }
+
+  }
+  else {
+
+    lcd.setCursor(0, 0);
+    lcd.print("L1:");
+    lcd.print(ldrSE);
+
+    lcd.print(" L2:");
+    lcd.print(ldrSD);
+
+    lcd.setCursor(0, 1);
+    lcd.print("L3:");
+    lcd.print(ldrIE);
+
+    lcd.print(" L4:");
+    lcd.print(ldrID);
+
+  }
+
+  telaAtual = !telaAtual;
+
+}
+
+// ==================================================
+// SETUP
+// ==================================================
+
+void setup() {
+
+  Serial.begin(9600);
+
+  servoHorizontal.attach(9);
+  servoVertical.attach(10);
+
+  servoHorizontal.write(90);
+  servoVertical.write(90);
+
+  lcd.begin(16, 2);
+  lcd.setBacklight(1);
+
+  lcd.setCursor(0, 0);
+  lcd.print("RASTREADOR SOLAR");
+
+  lcd.setCursor(0, 1);
+  lcd.print("Inicializando...");
+
+  tempoLCD = millis();
+  tempoLeitura = millis();
+
+}
+
+// ==================================================
+// LOOP PRINCIPAL
+// ==================================================
+
+void loop() {
+
+  unsigned long agora = millis();
+
+  // Leitura periodica
+
+  if (agora - tempoLeitura >= INTERVALO_LEITURA) {
+
+    tempoLeitura = agora;
+
+    lerSensores();
+
+    controlarFalhas();
+
+  }
+
+  // Teclado
+
+  controlarTeclado();
+
+  // Maquina de estados
+
+  switch (estadoAtual) {
+
+    case AUTOMATICO:
+
+      if (sensoresValidos) {
+        rastreamentoAutomatico();
+      }
+
+      break;
+
+    case MANUAL:
+
+      break;
+
+    case CENTRALIZADO:
+
+      break;
+
+    case FALHA:
+
+      // Interrompe o rastreamento.
+      // Mantem os servos na ultima posicao.
+
+      break;
+
+  }
+
+  atualizarServos();
+
+  atualizarLCD();
+
+}
